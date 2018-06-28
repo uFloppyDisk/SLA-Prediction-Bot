@@ -1,0 +1,5 @@
+~/database
+~/logs
+~/ref
+~/__pycache__
+*.pyc
