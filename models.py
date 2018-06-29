@@ -61,10 +61,8 @@ class Match(Base):
         if self.teamscore1 is not None and self.teamscore2 is not None:
             if self.teamscore1 > self.teamscore2:
                 self.winner = self.teamname1
-                log.info(f"Teamscore1 is greater than Teamscore2, winner is {self.winner}")
             elif self.teamscore2 > self.teamscore1:
                 self.winner = self.teamname2
-                log.info(f"Teamscore2 is greater than Teamscore1, winner is {self.winner}")
 
             return
         
@@ -73,15 +71,15 @@ class Match(Base):
 
 class Definition(Base):
     __tablename__ = "definitions"
+    __table_args__ = {'sqlite_autoincrement': True}
 
     DEF_ID = Column(Integer, primary_key=True, autoincrement=True)
     DEF_TYPE = Column(TEXT)
     TEAM_ID = Column(Integer)
     DEF_HLTV = Column(TEXT, nullable=False)
-    DEF_SHEET = Column(TEXT, nullable=False)
+    DEF_SHEET = Column(TEXT)
 
     def __init__(self, **options):
-        self.DEF_ID = 0
         self.DEF_TYPE = None
         self.TEAM_ID = None
         self.DEF_HLTV = None
@@ -93,7 +91,6 @@ class Definition(Base):
         return f"Definition(type: {self.DEF_TYPE}) {self.DEF_HLTV} = {self.DEF_SHEET}"
 
     def set(self, **options):
-        self.DEF_ID = options.get('DEF_ID', self.DEF_ID)
         self.DEF_TYPE = options.get('DEF_TYPE', self.DEF_TYPE)
         self.TEAM_ID = options.get('TEAM_ID', self.TEAM_ID)
         self.DEF_HLTV = options.get('DEF_HLTV', self.DEF_HLTV)

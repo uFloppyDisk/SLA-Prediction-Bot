@@ -62,7 +62,7 @@ def main():
     service = discovery.build('sheets', 'v4', http=http,
                               discoveryServiceUrl=discoveryUrl)
 
-    spreadsheetId = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
+    spreadsheetId = '1mP7X88b8xlxOPXfmOvACkpnMfnEYNZwfsAQ6Ki_0ftE'
     rangeName = 'Class Data!A2:E'
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheetId, range=rangeName).execute()

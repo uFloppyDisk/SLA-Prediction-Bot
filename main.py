@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 import time
@@ -6,14 +7,13 @@ import re
 from bs4 import BeautifulSoup
 import gspread
 from lxml import html
-import pickle
 import requests
 import sqlite3 as sql
 import time
 
 import db
 from db import DBManager
-from models import Match, Team
+from models import Match, Team, Definition
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ class Scraper:
 
         self.teams = {}
         self.matches = {}
+        self.definitions = {}
 
         self.regex_matchid = re.compile('matches\/([0-9]{2,10})')
         self.regex_teamid = re.compile('team\/([0-9]{2,10})')
@@ -70,7 +71,9 @@ class Scraper:
         self.eventid = eventid
         self.num_daysadvance = num_daysadvance
 
-    def update(self):
+    def update(self, session):
+        self.session = session
+
         self.upcoming_response = requests.get(f'http://www.hltv.org/matches?event={self.eventid}')
         self.upcoming_soup = BeautifulSoup(self.upcoming_response.content, "html.parser")
 
@@ -95,13 +98,26 @@ class Scraper:
                 continue
 
             anchor = row.find("a")
-            t_id = int(re.search(self.regex_teamid, anchor["href"]).group(1))
-            t_name = anchor.text
 
-            if t_id in self.teams.keys():
-                pass
+            dictTeam = {}
+            dictTeam["id"] = int(re.search(self.regex_teamid, anchor["href"]).group(1))
+            dictTeam["name"] = anchor.text
+
+            if dictTeam["id"] in self.teams.keys():
+                self.teams[dictTeam["id"]].set(**dictTeam)
             else:
-                self.teams[t_id] = Team(id=t_id, name=t_name)
+                team = Team(**dictTeam)
+                self.teams[dictTeam["id"]] = team
+
+                self.session.add(team)
+
+            if dictTeam["id"] in self.definitions.keys():
+                self.definitions[dictTeam["id"]].set(TEAM_ID=dictTeam["id"], DEF_HLTV=dictTeam["name"])
+            else:
+                definiton = Definition(DEF_TYPE="team", TEAM_ID=dictTeam["id"], DEF_HLTV=dictTeam["name"])
+                self.definitions[dictTeam["id"]] = definiton
+
+                self.session.add(definiton)
 
 
     def get_upcoming_matches(self):
@@ -115,11 +131,12 @@ class Scraper:
             match_day = match_day.text
 
             for matchdata in s.find_all("a"):
-                m_id = int(re.search(self.regex_matchid, matchdata["href"]).group(1))
-                m_unix_ts = int(matchdata["data-zonedgrouping-entry-unix"])
-                m_state = 1
+                dictMatch = {}
+                dictMatch["id"] = int(re.search(self.regex_matchid, matchdata["href"]).group(1))
+                dictMatch["unix_ts"] = int(matchdata["data-zonedgrouping-entry-unix"])
+                dictMatch["state"] = 1
 
-                m_map = ''
+                dictMatch["map"] = '?'
 
                 table = matchdata.find("tr")
                 teams = []
@@ -127,15 +144,20 @@ class Scraper:
                     if tag["class"][0] == "team":
                         teams.append(tag.text)
                     elif tag["class"][0] == "map-text":
-                        m_map = tag.text
+                        dictMatch["map"] = tag.text
 
-                m_teamname1 = teams[0]
-                m_teamname2 = teams[1]
+                dictMatch["teamname1"] = teams[0]
+                dictMatch["teamname2"] = teams[1]
 
-                match = Match(id=m_id, unix_ts=m_unix_ts, state=m_state, map=m_map, teamname1=m_teamname1, teamname2=m_teamname2)
-                self.matches[m_id] = match
+                if dictMatch["id"] in self.matches.keys():
+                    self.matches[dictMatch['id']].set(**dictMatch)
+                else:
+                    match = Match(**dictMatch)
+                    self.matches[dictMatch['id']] = match
 
-                log.info(f"Finished upcoming match (id: {match.id})")
+                    self.session.add(match)
+
+                log.info(f"Finished upcoming match (id: {dictMatch['id']})")
 
             log.info(f"Finished upcoming matchday (date: {match_day})")
 
@@ -149,17 +171,28 @@ class Scraper:
             matchdata = live_match.find("a")
 
             table = matchdata.find("table")
-            m_id = int(table["data-livescore-match"])
 
-            m_map = ''
+            dictMatch = {}
+            dictMatch["id"] = int(table["data-livescore-match"])
+            dictMatch["state"] = 0
+
+            dictMatch["map"] = '?'
+
             bestof = table.find("td", class_="bestof").text
             multiple_maps = False
             if "1" in bestof:
-                m_map = table.find("td", class_="map").text.lower()
+                dictMatch["map"] = table.find("td", class_="map").text.lower()
             else:
                 multiple_maps = True
                 map_count = table.find("td", class_="map")
-                m_map = "bo" + len(map_count)
+                dictMatch["map"] = "bo" + len(map_count)
+
+            teams = []
+            for tag in table.find_all("span", class_="team-name"):
+                teams.append(tag.text)
+
+            dictMatch["teamname1"] = teams[0]
+            dictMatch["teamname2"] = teams[1]
 
             teamscores = []
             if multiple_maps:
@@ -187,31 +220,21 @@ class Scraper:
 
                     teamscores.append(score)
 
-            m_teamscore1 = teamscores[0]
-            m_teamscore2 = teamscores[1]
+            dictMatch["teamscore1"] = teamscores[0]
+            dictMatch["teamscore2"] = teamscores[1]
 
-            if m_id in self.matches.keys():
-                self.matches[m_id].state = 0
-                self.matches[m_id].map = m_map
-
-                self.matches[m_id].teamscore1 = m_teamscore1
-                self.matches[m_id].teamscore2 = m_teamscore2
+            if dictMatch["id"] in self.matches.keys():
+                self.matches[dictMatch['id']].set(**dictMatch)
 
             else:
-                m_unix_ts = int(time.time())
-                m_state = 0
-                teams = []
-                for tag in table.find_all("span", class_="team-name"):
-                    teams.append(tag.text)
+                dictMatch["unix_ts"] = int(time.time())
 
-                m_teamname1 = teams[0]
-                m_teamname2 = teams[1]
+                match = Match(**dictMatch)
+                self.matches[dictMatch['id']] = match
 
-                match = Match(id=m_id, unix_ts=m_unix_ts, state=m_state, map=m_map, teamname1=m_teamname1, teamname2=m_teamname2, teamscore1=m_teamscore1, teamscore2=m_teamscore2)
+                self.session.add(match)
 
-                self.matches[m_id] = match
-
-                log.info(f"Finished ongoing match (id: {m_id}")
+                log.info(f"Finished ongoing match (id: {dictMatch['id']}")
 
     def get_results(self):
         results = self.results_soup.find_all("div", {"class": "result-con"})
@@ -222,20 +245,21 @@ class Scraper:
         for result in results:
             table = result.find("a")
 
-            m_id = int(re.search(self.regex_matchid, table["href"]).group(1))
+            dictMatch = {}
+            dictMatch["id"] = int(re.search(self.regex_matchid, table["href"]).group(1))
 
             td = table.find("td", class_="date-cell")
             span = td.find("span")
-            m_unix_ts = int(span["data-unix"])
-            m_state = -1
+            dictMatch["unix_ts"] = int(span["data-unix"])
+            dictMatch["state"] = -1
 
             teams = []
             for data in table.find_all("td", class_="team-cell"):
                 temp = data.find("div", class_="line-align")
                 teams.append(temp.find("div").text)
 
-            m_teamname1 = teams[0]
-            m_teamname2 = teams[1]
+            dictMatch["teamname1"] = teams[0]
+            dictMatch["teamname2"] = teams[1]
 
             t_resultscores = table.find("td", class_="result-score")
 
@@ -243,26 +267,24 @@ class Scraper:
             for data in t_resultscores.find_all("span"):
                 scores.append(int(data.text))
 
-            m_teamscore1 = scores[0]
-            m_teamscore2 = scores[1]
+            dictMatch["teamscore1"] = scores[0]
+            dictMatch["teamscore2"] = scores[1]
 
-            m_map = table.find("div", class_="map-text").text
+            dictMatch["map"] = table.find("div", class_="map-text").text
 
-            if m_id in self.matches.keys():
-                self.matches[m_id].state = -1
-                self.matches[m_id].map = m_map
-                self.matches[m_id].teamscore1 = m_teamscore1
-                self.matches[m_id].teamscore2 = m_teamscore2
-                self.matches[m_id].determine_winner()
+            if dictMatch["id"] in self.matches.keys():
+                self.matches[dictMatch['id']].set(**dictMatch)
+                self.matches[dictMatch['id']].determine_winner()
 
             else:
-                match = Match(id=m_id, unix_ts=m_unix_ts, state=m_state, map=m_map, teamname1=m_teamname1, teamname2=m_teamname2, teamscore1=m_teamscore1, teamscore2=m_teamscore2)
-
+                match = Match(**dictMatch)
                 match.determine_winner()
 
-                self.matches[m_id] = match
+                self.matches[dictMatch['id']] = match
 
-            log.info(f"Finished match results (id: {m_id}, unix: {m_unix_ts})")
+                self.session.add(match)
+
+            log.info(f"Finished match results (id: {dictMatch['id']}, unix: {dictMatch['unix_ts']})")
 
 
 class Sheets:
@@ -295,6 +317,39 @@ class Sheets:
                 selection = index
 
         self.wsheets[selection] = self.sheet.get_worksheet(selection)
+
+    def append_match(self, hltv_matches):
+        sheet = self.wsheets[0]
+        sheet_ids = [entry for entry in sheet.col_values(1) if entry]
+        index = len(sheet_ids) + 1
+
+        boolSheetUpdated = False
+        for match_key in hltv_matches.keys():
+            match = hltv_matches[match_key]
+
+            if match in sheet_ids:
+                # Update match with new info
+                pass
+            else:
+                cells = sheet.range(index, 1, index, 13)
+
+                cells[0].value = match.id
+                cells[1].value = datetime.datetime.fromtimestamp(match.unix_ts/1000).strftime('%m/%d/%Y')
+                cells[2].value = match.teamname1
+                cells[3].value = "vs"
+                cells[4].value = match.teamname2
+                cells[5].value = match.map
+                cells[6].value = match.teamscore1
+                cells[7].value = "-"
+                cells[8].value = match.teamscore2
+                cells[11].value = match.flags
+                cells[12].value = match.winner
+
+                sheet.update_cells(cells)
+
+                index += 1
+
+        log.info()
 
     def update_sheet(self, hltv_matches):
         sheet = self.wsheets[0]
@@ -337,10 +392,13 @@ class Database:
     def __init__(self, eventid):
         pass
 
+
 def db_get_matches(match_fetch, session):
     matches = session.query(Match).order_by(Match.id)
 
     for match in matches:
+        if match.id == 0:
+            continue
         match_fetch.matches[match.id] = match
         session.add(match)
 
@@ -350,6 +408,13 @@ def db_get_teams(match_fetch, session):
     for team in teams:
         match_fetch.teams[team.id] = team
         session.add(team)
+
+def db_get_definitions(match_fetch, session):
+    defs = session.query(Definition).filter(Definition.DEF_TYPE == "team").order_by(Definition.TEAM_ID)
+
+    for _def in defs:
+        match_fetch.definitions[_def.TEAM_ID] = _def
+        session.add(_def)
 
 
 def main(args):
@@ -361,28 +426,25 @@ def main(args):
     DBManager.init(args.eventid)
     db.create_tables(DBManager.engine)
     session = DBManager.create_session()
-    log.info(session.identity_map.values())
-    db_add = True
 
     match_fetch = Scraper(args.eventid, args.numdaysadvance)
 
     db_get_matches(match_fetch, session)
     db_get_teams(match_fetch, session)
+    db_get_definitions(match_fetch, session)
 
     exit = False
     while not exit:
-        match_fetch.update()
+        match_fetch.update(session)
 
         match_fetch.get_teams()
         match_fetch.get_matches()
         match_fetch.get_results()
 
-        db_add = False
-
-        log.info(session.dirty)
+        session.flush()
         session.commit()
 
-        #ssmanager.update_sheet(upcoming)
+        ssmanager.append_match(match_fetch.matches)
 
         time.sleep(120)
 
