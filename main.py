@@ -56,6 +56,11 @@ def get_credentials(args):
         log.debug('Storing credentials to ' + credential_path)
     return credentials
 
+def tryconvert(value, default=-1):
+    try:
+        return(int(value))
+    except ValueError:
+        return(default)
 
 class Scraper:
     def __init__(self, eventid, num_daysadvance=1):
@@ -295,6 +300,8 @@ class Sheets:
         self.sskey = None
         self.wsheets = {}
 
+        self.database = None
+
     def get_spreadsheet(self, sskey):
         self.sskey = sskey
         self.sheet = self.client.open_by_key(self.sskey)
@@ -320,36 +327,42 @@ class Sheets:
 
     def append_match(self, hltv_matches):
         sheet = self.wsheets[0]
-        sheet_ids = [entry for entry in sheet.col_values(1) if entry]
-        index = len(sheet_ids) + 1
+        sheet_ids = [(lambda v: tryconvert(v))(entry) for entry in sheet.col_values(1) if entry]
+        entries_in_sheet = [entry for entry in sheet.col_values(2) if entry]
+        index = len(entries_in_sheet) + 1
 
         boolSheetUpdated = False
         for match_key in hltv_matches.keys():
             match = hltv_matches[match_key]
 
-            if match in sheet_ids:
+            definitions = {
+                "map": self.database.get_map_definition(match.map),
+                "teamname1": self.database.get_team_definition(match.teamname1),
+                "teamname2": self.database.get_team_definition(match.teamname2),
+                "winner": self.database.get_team_definition(match.winner)
+            }
+
+            if match.id in sheet_ids:
                 # Update match with new info
                 pass
             else:
                 cells = sheet.range(index, 1, index, 13)
 
                 cells[0].value = match.id
-                cells[1].value = datetime.datetime.fromtimestamp(match.unix_ts/1000).strftime('%m/%d/%Y')
-                cells[2].value = match.teamname1
+                cells[1].value = datetime.datetime.fromtimestamp(match.unix_ts/1000).strftime("%m/%d/%Y")
+                cells[2].value = definitions["teamname1"]
                 cells[3].value = "vs"
-                cells[4].value = match.teamname2
-                cells[5].value = match.map
+                cells[4].value = definitions["teamname2"]
+                cells[5].value = definitions["map"]
                 cells[6].value = match.teamscore1
                 cells[7].value = "-"
                 cells[8].value = match.teamscore2
                 cells[11].value = match.flags
-                cells[12].value = match.winner
+                cells[12].value = definitions["winner"]
 
-                sheet.update_cells(cells)
+                sheet.update_cells(cells, value_input_option='USER_ENTERED')
 
                 index += 1
-
-        log.info()
 
     def update_sheet(self, hltv_matches):
         sheet = self.wsheets[0]
@@ -389,32 +402,54 @@ class Sheets:
 
 
 class Database:
-    def __init__(self, eventid):
-        pass
+    def __init__(self):
+        self.session = None
 
+    def update_session(self, session):
+        self.session = session
 
-def db_get_matches(match_fetch, session):
-    matches = session.query(Match).order_by(Match.id)
+    def get_matches(self, _dict):
+        matches = self.session.query(Match).order_by(Match.id)
 
-    for match in matches:
-        if match.id == 0:
-            continue
-        match_fetch.matches[match.id] = match
-        session.add(match)
+        for match in matches:
+            if match.id == 0:
+                continue
 
-def db_get_teams(match_fetch, session):
-    teams = session.query(Team).order_by(Team.id)
+            _dict.matches[match.id] = match
+            self.session.add(match)
 
-    for team in teams:
-        match_fetch.teams[team.id] = team
-        session.add(team)
+    def get_teams(self, _dict):
+        teams = self.session.query(Team).order_by(Team.id)
 
-def db_get_definitions(match_fetch, session):
-    defs = session.query(Definition).filter(Definition.DEF_TYPE == "team").order_by(Definition.TEAM_ID)
+        for team in teams:
+            if team.id == 0:
+                continue
 
-    for _def in defs:
-        match_fetch.definitions[_def.TEAM_ID] = _def
-        session.add(_def)
+            _dict.teams[team.id] = team
+            self.session.add(team)
+
+    def get_definitions(self, _dict):
+        defs = self.session.query(Definition).filter(Definition.DEF_TYPE == "team").order_by(Definition.TEAM_ID)
+
+        for _def in defs:
+            _dict.definitions[_def.TEAM_ID] = _def
+            self.session.add(_def)
+
+    def get_team_definition(self, def_hltv):
+        _def = self.session.query(Definition).filter(Definition.DEF_TYPE == "team").filter(Definition.DEF_HLTV == def_hltv).first()
+
+        if _def is None:
+            return def_hltv
+        else:
+            return _def.DEF_SHEET
+
+    def get_map_definition(self, def_hltv):
+        _def = self.session.query(Definition).filter(Definition.DEF_TYPE == "map").filter(Definition.DEF_HLTV == def_hltv).first()
+
+        if _def is None:
+            return def_hltv
+        else:
+            return _def.DEF_SHEET
 
 
 def main(args):
@@ -427,14 +462,19 @@ def main(args):
     db.create_tables(DBManager.engine)
     session = DBManager.create_session()
 
+    database = Database()
+    database.update_session(session)
+
     match_fetch = Scraper(args.eventid, args.numdaysadvance)
 
-    db_get_matches(match_fetch, session)
-    db_get_teams(match_fetch, session)
-    db_get_definitions(match_fetch, session)
+    database.get_matches(match_fetch)
+    database.get_teams(match_fetch)
+    database.get_definitions(match_fetch)
 
     exit = False
     while not exit:
+        database.update_session(session)
+        ssmanager.database = database
         match_fetch.update(session)
 
         match_fetch.get_teams()
@@ -445,6 +485,8 @@ def main(args):
         session.commit()
 
         ssmanager.append_match(match_fetch.matches)
+
+        log.info("Finished update. Waiting 120 seconds...")
 
         time.sleep(120)
 

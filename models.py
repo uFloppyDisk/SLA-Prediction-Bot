@@ -17,8 +17,8 @@ class Match(Base):
     state = Column(Integer, default=1)
     teamname1 = Column(TEXT, nullable=False)
     teamname2 = Column(TEXT, nullable=False)
-    teamscore1 = Column(Integer, default=0)
-    teamscore2 = Column(Integer, default=0)
+    teamscore1 = Column(Integer, default=None)
+    teamscore2 = Column(Integer, default=None)
     map = Column(TEXT)
     winner = Column(TEXT)
     flags = Column(TEXT)
@@ -29,8 +29,8 @@ class Match(Base):
         self.state = 1
         self.teamname1 = None
         self.teamname2 = None
-        self.teamscore1 = 0
-        self.teamscore2 = 0
+        self.teamscore1 = None
+        self.teamscore2 = None
         self.map = None
         self.winner = None
         self.flags = None
