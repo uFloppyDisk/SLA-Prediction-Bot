@@ -25,6 +25,9 @@ class DBManager:
 		DBManager.engine = create_engine(f"sqlite:///database/{eventid}.db")
 		DBManager.Session = sessionmaker(bind=DBManager.engine, autoflush=False)
 
+	def update():
+		pass
+
 	def create_session(**options):
 		try:
 			return DBManager.Session(**options)

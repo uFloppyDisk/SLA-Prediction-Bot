@@ -1,4 +1,6 @@
+import datetime
 import logging
+import time
 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, Boolean
@@ -8,6 +10,7 @@ from sqlalchemy.dialects.mysql import TEXT
 from db import Base
 
 log = logging.getLogger(__name__)
+
 
 class Match(Base):
     __tablename__ = "matches"
@@ -40,6 +43,10 @@ class Match(Base):
     def __repr__(self):
         return f"Match(id: {self.id}) [{self.teamname1} vs {self.teamname2}]"
 
+    def __str__(self):
+        dateandtime = self.date(format="%b. %d at %I:%M")
+        return f"[{self.id}] {dateandtime} - '{self.teamname1}' VS '{self.teamname2}' on {self.map}"
+
     def set(self, **options):
         self.id = options.get('id', self.id)
         self.unix_ts = options.get('unix_ts', self.unix_ts)
@@ -57,6 +64,31 @@ class Match(Base):
         instance = self(**options)
         return instance
 
+    def ms_unix_to_unix(self, unix_ts=None):
+        if self.unix_ts is not None:
+            temp = self.unix_ts
+        else:
+            if unix_ts is not None:
+                temp = unix_ts
+            else:
+                temp = time.time()
+
+        if (temp % 1000) == 0 and len(str(temp)) > 10:
+            unix = temp / 1000
+        else:
+            unix = temp
+
+        self.unix_ts = unix
+
+    def date(self, format="%#m/%#d/%Y"):
+        temp = None
+        if self.unix_ts is None:
+            temp = time.time()
+        else:
+            temp = self.unix_ts
+
+        return datetime.datetime.fromtimestamp(temp).strftime(format)
+
     def determine_winner(self):
         if self.teamscore1 is not None and self.teamscore2 is not None:
             if self.teamscore1 > self.teamscore2:
@@ -65,9 +97,10 @@ class Match(Base):
                 self.winner = self.teamname2
 
             return
-        
+
         else:
             return
+
 
 class Definition(Base):
     __tablename__ = "definitions"
@@ -95,6 +128,7 @@ class Definition(Base):
         self.TEAM_ID = options.get('TEAM_ID', self.TEAM_ID)
         self.DEF_HLTV = options.get('DEF_HLTV', self.DEF_HLTV)
         self.DEF_SHEET = options.get('DEF_SHEET', self.DEF_SHEET)
+
 
 class Team(Base):
     __tablename__ = "teams"

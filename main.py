@@ -1,6 +1,7 @@
 import datetime
+import httplib2
+import json
 import logging
-import os
 import time
 import re
 
@@ -15,52 +16,9 @@ import db
 from db import DBManager
 from models import Match, Team, Definition
 
+from utils import get_credentials, tryconvert, range_to_file, get_creds
+
 log = logging.getLogger(__name__)
-
-def get_credentials(args):
-    """Gets valid user credentials from storage.
-
-    If nothing has been stored, or if the stored credentials are invalid,
-    the OAuth2 flow is completed to obtain the new credentials.
-
-    Returns:
-        Credentials, the obtained credential.
-    """
-    from apiclient import discovery
-    from oauth2client import client
-    from oauth2client import tools
-    from oauth2client.file import Storage
-
-    # If modifying these scopes, delete your previously saved credentials
-    # at ~/.credentials/sheets.googleapis.com-python-quickstart.json
-    SCOPES = 'https://www.googleapis.com/auth/spreadsheets'
-    CLIENT_SECRET_FILE = 'secrets/client_secret.json'
-    APPLICATION_NAME = 'CLI'
-
-    home_dir = os.path.expanduser('~')
-    credential_dir = os.path.join(home_dir, '.credentials')
-    if not os.path.exists(credential_dir):
-        os.makedirs(credential_dir)
-    credential_path = os.path.join(credential_dir,
-                                   'sheets.googleapis.com.json')
-
-    store = Storage(credential_path)
-    credentials = store.get()
-    if not credentials or credentials.invalid:
-        flow = client.flow_from_clientsecrets(CLIENT_SECRET_FILE, SCOPES)
-        flow.user_agent = APPLICATION_NAME
-        if args:
-            credentials = tools.run_flow(flow, store, args)
-        else:
-            credentials = tools.run(flow, store)
-        log.debug('Storing credentials to ' + credential_path)
-    return credentials
-
-def tryconvert(value, default=-1):
-    try:
-        return(int(value))
-    except ValueError:
-        return(default)
 
 class Scraper:
     def __init__(self, eventid, num_daysadvance=1):
@@ -119,7 +77,7 @@ class Scraper:
             if dictTeam["id"] in self.definitions.keys():
                 self.definitions[dictTeam["id"]].set(TEAM_ID=dictTeam["id"], DEF_HLTV=dictTeam["name"])
             else:
-                definiton = Definition(DEF_TYPE="team", TEAM_ID=dictTeam["id"], DEF_HLTV=dictTeam["name"])
+                definiton = Definition(DEF_TYPE="team", TEAM_ID=dictTeam["id"], DEF_HLTV=dictTeam["name"], DEF_SHEET=dictTeam["name"])
                 self.definitions[dictTeam["id"]] = definiton
 
                 self.session.add(definiton)
@@ -156,15 +114,17 @@ class Scraper:
 
                 if dictMatch["id"] in self.matches.keys():
                     self.matches[dictMatch['id']].set(**dictMatch)
+                    self.matches[dictMatch['id']].ms_unix_to_unix()
                 else:
                     match = Match(**dictMatch)
+                    match.ms_unix_to_unix()
                     self.matches[dictMatch['id']] = match
 
                     self.session.add(match)
 
-                log.info(f"Finished upcoming match (id: {dictMatch['id']})")
+                log.debug(f"Finished upcoming match (id: {dictMatch['id']})")
 
-            log.info(f"Finished upcoming matchday (date: {match_day})")
+            log.debug(f"Finished upcoming matchday (date: {match_day})")
 
     def get_ongoing_matches(self):
         live_matches = self.upcoming_soup.find("div", {"class": "live-matches"})
@@ -230,16 +190,19 @@ class Scraper:
 
             if dictMatch["id"] in self.matches.keys():
                 self.matches[dictMatch['id']].set(**dictMatch)
+                self.matches[dictMatch['id']].ms_unix_to_unix()
 
             else:
                 dictMatch["unix_ts"] = int(time.time())
 
                 match = Match(**dictMatch)
+                match.ms_unix_to_unix()
+
                 self.matches[dictMatch['id']] = match
 
                 self.session.add(match)
 
-                log.info(f"Finished ongoing match (id: {dictMatch['id']}")
+                log.debug(f"Finished ongoing match (id: {dictMatch['id']}")
 
     def get_results(self):
         results = self.results_soup.find_all("div", {"class": "result-con"})
@@ -279,26 +242,33 @@ class Scraper:
 
             if dictMatch["id"] in self.matches.keys():
                 self.matches[dictMatch['id']].set(**dictMatch)
+                self.matches[dictMatch['id']].ms_unix_to_unix()
                 self.matches[dictMatch['id']].determine_winner()
 
             else:
                 match = Match(**dictMatch)
+                match.ms_unix_to_unix()
                 match.determine_winner()
 
                 self.matches[dictMatch['id']] = match
 
                 self.session.add(match)
 
-            log.info(f"Finished match results (id: {dictMatch['id']}, unix: {dictMatch['unix_ts']})")
+            log.debug(f"Finished match results (id: {dictMatch['id']}, unix: {dictMatch['unix_ts']})")
 
 
 class Sheets:
-    def __init__(self, credentials):
+    def __init__(self, credentials=None, authlib_session=None):
         self.credentials = credentials
-        self.client = gspread.authorize(credentials)
+        self.client = gspread.authorize(self.credentials)
+        #self.client = Client(None, authlib_session)
+
+        self.sheet = None
 
         self.sskey = None
         self.wsheets = {}
+
+        self.wsheet_range = {}
 
         self.database = None
 
@@ -325,31 +295,70 @@ class Sheets:
 
         self.wsheets[selection] = self.sheet.get_worksheet(selection)
 
-    def append_match(self, hltv_matches):
-        sheet = self.wsheets[0]
-        sheet_ids = [(lambda v: tryconvert(v))(entry) for entry in sheet.col_values(1) if entry]
-        entries_in_sheet = [entry for entry in sheet.col_values(2) if entry]
-        index = len(entries_in_sheet) + 1
+    def get_worksheet_range(self, index=None):
+        if not index:
+            index = 0
 
-        boolSheetUpdated = False
+        # column_keys = {
+        #      1: "id",          2: "date",
+        #      3: "teamname1",   4: "versus",
+        #      5: "teamname2",   6: "map",
+        #      7: "teamscore1",  8: "score-divider",
+        #      9: "teamscore2", 10: "selection",
+        #     11: "certainty",  12: "flags",
+        #     13: "winner"
+        # }
+
+        _range = self.wsheets[index].range(2, 1, 400, 13)
+
+        temp = {}
+
+        for cell in _range:
+            if cell.row not in temp.keys():
+                temp[cell.row] = []
+                temp[cell.row].append(cell)
+            else:
+                if cell.value == '':
+                    cell.value = None
+
+                temp[cell.row].append(cell)
+
+        entries_to_delete = []
+        for _entry in temp.keys():
+            entry = temp[_entry]
+
+            if entry[0].value is None or entry[0].value == '':
+                entries_to_delete.append(_entry)
+                continue
+
+        for _entry in entries_to_delete:
+            del temp[_entry]
+
+        self.wsheet_range[index] = temp
+
+        return
+
+    def append_matches(self, hltv_matches):
+        sheet = self.wsheets[0]
+        rows_taken = self.wsheet_range[0].keys()
+        sheet_ids = [(lambda v: tryconvert(v))(self.wsheet_range[0][entry][0].value) for entry in rows_taken]
+        index = max(rows_taken) + 1
+
         for match_key in hltv_matches.keys():
             match = hltv_matches[match_key]
 
-            definitions = {
-                "map": self.database.get_map_definition(match.map),
-                "teamname1": self.database.get_team_definition(match.teamname1),
-                "teamname2": self.database.get_team_definition(match.teamname2),
-                "winner": self.database.get_team_definition(match.winner)
-            }
+            if match.id not in sheet_ids:
+                definitions = {
+                    "map": self.database.get_map_definition(match.map),
+                    "teamname1": self.database.get_team_definition(match.teamname1),
+                    "teamname2": self.database.get_team_definition(match.teamname2),
+                    "winner": self.database.get_team_definition(match.winner)
+                }
 
-            if match.id in sheet_ids:
-                # Update match with new info
-                pass
-            else:
                 cells = sheet.range(index, 1, index, 13)
 
                 cells[0].value = match.id
-                cells[1].value = datetime.datetime.fromtimestamp(match.unix_ts/1000).strftime("%m/%d/%Y")
+                cells[1].value = datetime.datetime.fromtimestamp(match.unix_ts).strftime("%m/%d/%Y")
                 cells[2].value = definitions["teamname1"]
                 cells[3].value = "vs"
                 cells[4].value = definitions["teamname2"]
@@ -362,43 +371,88 @@ class Sheets:
 
                 sheet.update_cells(cells, value_input_option='USER_ENTERED')
 
+                log.info(f"Appended match to spreadsheet (id: {match.id} '{match.teamname1} vs {match.teamname2}')")
+
                 index += 1
 
-    def update_sheet(self, hltv_matches):
+    def update_matches(self, hltv_matches):
+        index_keys = {
+            0: "id",
+            1: "unix_ts",        # special
+            2: "teamname1",      # special
+            3: "versus",         # do not touch
+            4: "teamname2",      # special
+            5: "map",            # special
+            6: "teamscore1",
+            7: "score-divider",  # do not touch
+            8: "teamscore2",
+            9: "selection",      # do not touch
+            10: "certainty",     # do not touch
+            11: "flags",         # do not touch
+            12: "winner"         # special
+        }
+
+        do_not_touch = [3, 7, 9, 10, 11]
+        special = [1, 2, 4, 5, 12]
+
         sheet = self.wsheets[0]
-        sheet_ids = sheet.col_values(1)
 
-        boolSheetUpdated = False
-        for index in range(len(hltv_matches)):
-            match = hltv_matches[index]
+        cells = []
+        cells_to_update = []
+        for _entry in self.wsheet_range[0].keys():
+            entry = self.wsheet_range[0][_entry]
 
-            del match[2]
-
-            if str(match[0]) in sheet_ids:
-                row = sheet.find(str(match[0])).row
-                row_values = sheet.row_values(row)
-
-                if list(map(str, match)) == row_values:
-                    log.info(f"Match data is not different: ({match})")
-                    continue
-
-                cell_list = sheet.range(row, 1, row, len(match)-1)
-                i = 0
-                for cell in cell_list:
-                    cell.value = match[i]
-                    i += 1
-
-                sheet.update_cells(cell_list)
-                log.info(f"Updating match (id: {match[0]}) with new data: ({match})")
-                boolSheetUpdated = True
+            if entry[0].value is None or entry[0].value == '':
                 continue
 
-            sheet.append_row(hltv_matches[index])
+            if int(entry[0].value) in hltv_matches.keys():
+                match = hltv_matches[int(entry[0].value)]
 
-        if boolSheetUpdated:
-            log.debug("Sheet updated")
+                definitions = {
+                    "unix_ts": match.date(),
+                    "map": self.database.get_map_definition(match.map),
+                    "teamname1": self.database.get_team_definition(match.teamname1),
+                    "teamname2": self.database.get_team_definition(match.teamname2),
+                    "winner": self.database.get_team_definition(match.winner)
+                }
 
-        log.info(f"Finished updating sheet (number of matches updated: {len(hltv_matches)})")
+                rowChanged = False
+                i = 1
+                for cell in entry[1:]:
+                    if i in do_not_touch:
+                        pass
+                    else:
+                        db_value = getattr(match, index_keys[i])
+
+                        if i in special:
+                            db_value = definitions[index_keys[i]]
+
+                        sheet_value = tryconvert(cell.value, default=cell.value)
+
+                        if sheet_value == db_value:
+                            pass
+                        elif db_value is None:
+                            pass
+                        else:
+                            if not rowChanged:
+                                rowChanged = True
+
+                            cell.value = db_value
+                            cells_to_update.append(cell)
+
+                    cells.append(cell)
+
+                    i += 1
+
+            else:
+                for cell in entry[1:]:
+                    cells.append(cell)
+
+        if len(cells_to_update) > 0:
+            sheet.update_cells(cells, value_input_option='USER_ENTERED')
+            range_to_file(cells_to_update, filename="update.txt")
+
+            log.info(f"Updated {len(cells_to_update)} cells.")
 
 
 class Database:
@@ -454,7 +508,8 @@ class Database:
 
 def main(args):
     g_credentials = get_credentials(args)
-    ssmanager = Sheets(g_credentials)
+    ssmanager = Sheets(credentials=g_credentials)
+
     ssmanager.get_spreadsheet(args.sskey)
     ssmanager.open_worksheet()
 
@@ -473,20 +528,36 @@ def main(args):
 
     exit = False
     while not exit:
-        database.update_session(session)
-        ssmanager.database = database
-        match_fetch.update(session)
+        try:
+            database.update_session(session)
+            ssmanager.database = database
+            match_fetch.update(session)
 
-        match_fetch.get_teams()
-        match_fetch.get_matches()
-        match_fetch.get_results()
+            match_fetch.get_teams()
+            match_fetch.get_results()
+            match_fetch.get_matches()
 
-        session.flush()
-        session.commit()
+            session.flush()
+            session.commit()
 
-        ssmanager.append_match(match_fetch.matches)
+            ssmanager.get_worksheet_range()
+            range_to_file(ssmanager.wsheet_range[0])
 
-        log.info("Finished update. Waiting 120 seconds...")
+            ssmanager.update_matches(match_fetch.matches)
+            ssmanager.append_matches(match_fetch.matches)
+
+        except gspread.exceptions.APIError as err:
+            err_json = json.loads(err.response.text)
+
+            if err_json["error"]["code"] == 401:
+                log.warning("OAuth 2.0 access token has expired. Generating a new one.")
+
+                ssmanager.client.login()
+            else:
+                err_print = json.dumps(err_json, sort_keys=True, indent=4)
+                log.critical(f"Unhandled APIError:\n{err_print}")
+
+        finally:
+            log.info("Finished update. Waiting 120 seconds...")
 
         time.sleep(120)
-
