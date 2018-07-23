@@ -3,6 +3,7 @@ import httplib2
 import os
 
 from apiclient import discovery
+import gspread
 from oauth2client import client
 from oauth2client import tools
 from oauth2client.file import Storage
@@ -55,27 +56,17 @@ def main():
     students in a sample spreadsheet:
     https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit
     """
-    credentials = get_credentials()
-    http = credentials.authorize(httplib2.Http())
-    discoveryUrl = ('https://sheets.googleapis.com/$discovery/rest?'
-                    'version=v4')
-    service = discovery.build('sheets', 'v4', http=http,
-                              discoveryServiceUrl=discoveryUrl)
+    _creds = get_credentials()
+    client = gspread.authorize(_creds)
 
-    spreadsheetId = '1mP7X88b8xlxOPXfmOvACkpnMfnEYNZwfsAQ6Ki_0ftE'
-    rangeName = 'Class Data!A2:E'
-    result = service.spreadsheets().values().get(
-        spreadsheetId=spreadsheetId, range=rangeName).execute()
-    values = result.get('values', [])
+    sheet_key = "1mP7X88b8xlxOPXfmOvACkpnMfnEYNZwfsAQ6Ki_0ftE"
 
-    if not values:
-        print('No data found.')
-    else:
-        print('Name, Major:')
-        for row in values:
-            # Print columns A and E, which correspond to indices 0 and 4.
-            print('%s, %s' % (row[0], row[4]))
+    sheet = client.open_by_key(sheet_key).sheet1
 
+    sheet_range = sheet.range(2, 1, 140, 14)
+
+    for cell in sheet_range:
+        print(f"{cell.row}:{cell.col}")
 
 if __name__ == '__main__':
     main()

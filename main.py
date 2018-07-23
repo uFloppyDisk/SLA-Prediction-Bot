@@ -1,5 +1,4 @@
 import datetime
-import httplib2
 import json
 import logging
 import time
@@ -7,18 +6,17 @@ import re
 
 from bs4 import BeautifulSoup
 import gspread
-from lxml import html
 import requests
-import sqlite3 as sql
-import time
 
 import db
 from db import DBManager
 from models import Match, Team, Definition
 
+import exceptions
 from utils import get_credentials, tryconvert, range_to_file, get_creds
 
 log = logging.getLogger(__name__)
+
 
 class Scraper:
     def __init__(self, eventid, num_daysadvance=1):
@@ -82,14 +80,20 @@ class Scraper:
 
                 self.session.add(definiton)
 
-
     def get_upcoming_matches(self):
         matchdays = self.upcoming_soup.find_all("div", {"data-zonedgrouping-headline-classes": "standard-headline"}, limit=self.num_daysadvance)
 
-        if matchdays is None:
+        if not len(matchdays):
+            raise exceptions.NoMatchesFound(1)
             return []
 
-        for s in matchdays[0].find_all("div", {"class": "match-day"}):
+        matchdays = matchdays[0].find_all("div", {"class": "match-day"})
+
+        if not len(matchdays):
+            raise exceptions.NoMatchesFound(1)
+            return []
+
+        for s in matchdays:
             match_day = s.find("span", {"class": "standard-headline"})
             match_day = match_day.text
 
@@ -130,6 +134,7 @@ class Scraper:
         live_matches = self.upcoming_soup.find("div", {"class": "live-matches"})
 
         if live_matches is None:
+            raise exceptions.NoMatchesFound(0)
             return []
 
         for live_match in live_matches.find_all(lambda tag: tag.name == 'div' and tag.get('class') == ['live-match']):
@@ -207,7 +212,8 @@ class Scraper:
     def get_results(self):
         results = self.results_soup.find_all("div", {"class": "result-con"})
 
-        if results is None:
+        if not len(results):
+            raise exceptions.NoMatchesFound(-1)
             return []
 
         for result in results:
@@ -261,7 +267,7 @@ class Sheets:
     def __init__(self, credentials=None, authlib_session=None):
         self.credentials = credentials
         self.client = gspread.authorize(self.credentials)
-        #self.client = Client(None, authlib_session)
+        # self.client = Client(None, authlib_session)
 
         self.sheet = None
 
@@ -522,9 +528,17 @@ def main(args):
 
     match_fetch = Scraper(args.eventid, args.numdaysadvance)
 
-    database.get_matches(match_fetch)
-    database.get_teams(match_fetch)
-    database.get_definitions(match_fetch)
+    try:
+        database.get_matches(match_fetch)
+        database.get_teams(match_fetch)
+        database.get_definitions(match_fetch)
+
+    except exceptions.HLTVError as err:
+        if err.__class__.__name__ == "NoMatchesFound":
+            log.info(err.message)
+
+        else:
+            log.error(f"Unhandled HLTVError: {err}")
 
     exit = False
     while not exit:
@@ -545,6 +559,13 @@ def main(args):
 
             ssmanager.update_matches(match_fetch.matches)
             ssmanager.append_matches(match_fetch.matches)
+
+        except exceptions.HLTVError as err:
+            if err.__class__.__name__ == "NoMatchesFound":
+                log.info(err.message)
+
+            else:
+                log.error(f"Unhandled HLTVError: {err}")
 
         except gspread.exceptions.APIError as err:
             err_json = json.loads(err.response.text)
