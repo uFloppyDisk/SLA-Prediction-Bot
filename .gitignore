@@ -1,5 +1,9 @@
-~/database
-~/logs
-~/ref
-~/__pycache__
+database/*
+logs/*
+ref/*
+secrets/*
+__pycache__/*
 *.pyc
+*.txt
+
+*.sublime-*
